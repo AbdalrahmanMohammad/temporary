@@ -4,7 +4,7 @@
 -- Description: Create SP to extract of CSR data from PlanXpand to the Health Plan to allow them to reconcile the State CSRs with CMS
 --				 for Sate of Massachusetts.
 -- =============================================
-CREATE PROCEDURE [Report].[MassachusettsStateCSRReconciliationExtract]  
+CREATE PROCEDURE [Report].[MassachusettsStateCSRReconciliationExtract2024P1]  
     
 	@BenefitYear VARCHAR(10),    
     @IssuerId VARCHAR(Max),
@@ -51,10 +51,12 @@ BEGIN
 	Declare @IncludeOrphanClaimLinesDueToSubsidy CHAR(1);	--Includes Orphan Claims Due to Retroactive Eligibility Change?	
 	Declare @YearStart Date -- Start of Benefit Year
 	Declare @YearEnd Date   -- End of Benefit Year
+	Declare @ServiceEndDate Date -- Date of Service End Date For The Report
 	
 	-- Set Year boundaries
 	Select	@YearStart = CONVERT(Date, @BenefitYear + '-01-01')
 		,	@YearEnd   = CONVERT(Date, @BenefitYear + '-12-31')
+		,	@ServiceEndDate = CONVERT(Date, @BenefitYear + '-04-18')
 	
 	
 	-------------------------------------------- Extract Values from Paramters --------------------------------------------
@@ -194,6 +196,7 @@ BEGIN
 				AND hp.IsBasePlan = 0			-- Only Variant and State Plans
 				AND hp.IsOffExchange = 0		-- Only On Exchange Plans
 				AND hp.IsStatePlan = 1			-- Only State Plans
+				AND hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D') -- For 3C And 3D Plans
 			
 			-- Include the plans from the input criteria
 			INNER JOIN @TIssuerIds tis
@@ -225,11 +228,19 @@ BEGIN
 			INNER JOIN Enrollment.Client ct WITH ( NOLOCK )
 				ON  ct.ClientId = sub.ClientId
            
+		    -- Get claim type info.
+		    OUTER APPLY (select btc.IsInPatient
+						from Shared.BillTypeCode btc ( NOLOCK )
+						Where btc.BillTypeCodeId = c.BillTypeCode ) ctyp
+
             -- Include Claim Lines for selected Claims
             INNER JOIN Claim.ClaimLine cl WITH ( NOLOCK ) 
 				ON  c.ClaimId = cl.ClaimId 
 				AND cl.ClaimLineStatusId = 1	-- Only Completed Lines
 				AND cl.IsSubsidyEligible = 1	-- Only Subsidy Eligible
+		--		AND cl.ServiceStartDate <= @ServiceEndDate -- Only Claim Lines until 4-18-2024
+				AND ( ( ISNULL(ctyp.IsInPatient,0 ) = 1 AND c.ServiceStartDate <= @ServiceEndDate ) -- Institutional inpatient use claim service date
+					OR  ( ISNULL(ctyp.IsInPatient,0 ) = 0 AND cl.ServiceStartDate <= @ServiceEndDate) ) -- Profesional and outpatient use claim line service date
 			
 			-- Get Latest Line Revision
 			INNER JOIN ( SELECT ClaimId ,
