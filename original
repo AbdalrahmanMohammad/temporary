@@ -1,0 +1,472 @@
+-- =============================================
+-- Author:		Salman Qabaja
+-- Create date: 2023-04-15
+-- Description: Create SP to extract of CSR data from PlanXpand to the Health Plan to allow them to reconcile the State CSRs with CMS
+--				 for Sate of Massachusetts.
+-- =============================================
+CREATE PROCEDURE [Report].[MassachusettsStateCSRReconciliationExtract]  
+    
+	@BenefitYear VARCHAR(10),    
+    @IssuerId VARCHAR(Max),
+	@Exclusions VARCHAR(Max)  -- Exclusions 
+
+	-- These are  Exclusions Values:--
+	-- NOTE: To exclude one category send the number that coresponds to that category
+	-- 1. Claim Lines with Negative State Subsidies
+	-- 2. COB Claim Lines
+	-- 3. Newborn Claim Lines
+	-- 4. Orphan Claim Lines due to Retroactive Eligibility Change
+	-- 5. Orphan Claim Lines due to Retroactive Product Change
+	-- 6. Policies with $0.00 State Subsidy Amounts
+	-- 7. Policies with Negative State Subsidy Amounts	
+	-- 8. Orphan Claims due to Retroactive Eligibility Change
+	-- C. Exclude Claims with the given remark codes
+	-- 8. Orphan ClaimLiness due to Retroactive Subsidy Change
+AS
+BEGIN
+
+	-------------------------------------------- Declarations --------------------------------------------
+	----------- Variables Constants that hold the Exclusion Ids -----------
+	Declare  @ExcludeNegativeLines Char(1) ='1';
+	Declare  @ExcludeCOBClaimLines	Char(1) ='2';
+	Declare  @ExcludeNewBornClaims	Char(1)='3';
+	Declare  @ExcludeOrphanLinesDueEligibilityChange	Char(1) ='4';
+	Declare  @ExcludeOrphanLinesDueProductChange	Char(1) ='5';
+	Declare  @ExcludePolicyZero	Char(1) ='6';
+	Declare  @ExcludePolicyNegative	Char(1) ='7';
+	Declare  @ExcludeOrphanClaimLinessDueSubsidyChange	Char(1) ='8';
+
+	----------- Parameters Plasholders -----------
+	Declare @TIssuerIds Table (IssuerId	Varchar(6));	--To host alist of issuerIds passed as string
+	Declare @TExclusions Table (Exclusion	Varchar(100));
+	Declare @ClaimRemarkCodes Table (Code varchar(100));
+	Declare @ClaimLineRemarkCodes Table (Code varchar(100));
+	Declare @IncludeLinesWithNegativeStateSubsidy CHAR(1);	--Policy with Multiple Health Exchange IDs?
+	Declare @IncludePolicyZeroStateSubsidy CHAR(1);	--Policy with $0.00 State Subsidy Amounts?
+	Declare @IncludesPolicyWithNegativeStateSubsidy CHAR(1);	--Includes Claim Lines with Negative State Subsidies?
+	Declare @IncludeCobClaims CHAR(1);	--Includes COB Claim Lines?
+	Declare @IncludeNewBornClaims CHAR(1);	--Includes Newborn Claim Lines?
+	Declare @IncludeOrphanEligibility CHAR(1);	--Includes Orphan Claim Lines Due to Retroactive Eligibility Change?
+	Declare @IncludeOrphanProduct CHAR(1);	--Includes Orphan Claim Lines Due to Retroactive Product Change?
+	Declare @IncludeOrphanClaimLinesDueToSubsidy CHAR(1);	--Includes Orphan Claims Due to Retroactive Eligibility Change?	
+	Declare @YearStart Date -- Start of Benefit Year
+	Declare @YearEnd Date   -- End of Benefit Year
+	
+	-- Set Year boundaries
+	Select	@YearStart = CONVERT(Date, @BenefitYear + '-01-01')
+		,	@YearEnd   = CONVERT(Date, @BenefitYear + '-12-31')
+	
+	
+	-------------------------------------------- Extract Values from Paramters --------------------------------------------
+	----------- Extract IssuerIds -----------
+
+	Insert  @TIssuerIds 
+	Select  Val
+	From    dbo.fn_StringToTable(@IssuerId, ',', 1); 
+
+	----------- Extarct Exclusions -----------
+	Insert  @TExclusions 
+	Select  Val
+	From    dbo.fn_StringToTable(@Exclusions, ',', 1); 
+
+	----------- Extarct Remark coods -----------
+	----------- Claim Remark Code Exclusions ----------
+	Insert @ClaimRemarkCodes
+	Select Val
+	From   dbo.fn_StringToTable((select Exclusion from @TExclusions where Exclusion like 'C|%'), '|', 1);	
+	
+	delete from @ClaimRemarkCodes where Code = 'C'
+			
+	----------- Claim Line Remark Code Exclusions ----------
+	Insert @ClaimLineRemarkCodes
+	Select Val
+	From   dbo.fn_StringToTable((select Exclusion from @TExclusions where Exclusion like 'CL|%'), '|', 1);	
+	
+	delete from @ClaimLineRemarkCodes where Code = 'CL'
+
+	--
+	----------- Set Values of Exclusions -----------
+	--Set Include Claim Lines with Negative State Subsidy Ammount flag Value	
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludeNegativeLines)
+		Set  @IncludeLinesWithNegativeStateSubsidy= 'N';
+	Else
+		Set @IncludeLinesWithNegativeStateSubsidy = 'Y';
+	--Set Includes COB Claim Lines flag Value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludeCOBClaimLines)
+		Set @IncludeCobClaims = 'N';
+	Else
+		Set @IncludeCobClaims = 'Y';
+	--Set Includes Newborn Claim Lines flag Value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludeNewBornClaims)
+		Set @IncludeNewBornClaims = 'N';
+	Else
+		Set @IncludeNewBornClaims = 'Y';
+	--Set Includes Orphan Claim Lines Due to Retroactive Eligibility ChangeValue
+	IF Exists(Select 1 From @TExclusions Where Exclusion =@ExcludeOrphanLinesDueEligibilityChange)
+		Set @IncludeOrphanEligibility = 'N';
+	Else
+		Set @IncludeOrphanEligibility = 'Y';
+	--Set Includes Orphan Claim Lines Due to Retroactive Product Change Value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludeOrphanLinesDueProductChange)
+		Set @IncludeOrphanProduct = 'N';
+	Else
+		Set @IncludeOrphanProduct = 'Y';	
+	--Set Zero with State Subsidy ammount flag Value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludePolicyZero)
+		Set @IncludePolicyZeroStateSubsidy = 'N';
+	Else
+		Set @IncludePolicyZeroStateSubsidy = 'Y';
+	--Set Policy with negative subsidy flag Value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludePolicyNegative)
+		Set @IncludesPolicyWithNegativeStateSubsidy = 'N';
+	Else
+		Set @IncludesPolicyWithNegativeStateSubsidy = 'Y';
+	-- set policy orphan flag value
+	IF Exists(Select 1 From @TExclusions Where Exclusion = @ExcludeOrphanClaimLinessDueSubsidyChange)
+		Set @IncludeOrphanClaimLinesDueToSubsidy = 'N';
+	Else
+		Set @IncludeOrphanClaimLinesDueToSubsidy = 'Y';
+
+
+	--Define Date and time to stamp the returned data with
+	Declare @ExtractDate	Varchar(10) = REPLACE(CONVERT(varchar, GETDATE(), 110),'-','' );
+	Declare @ExtractTime	Varchar(10) = REPLACE(CONVERT(varchar, GETDATE(), 108),':','' );
+
+----------------------------------- Base Query for Source Claim Lines --------------------------------------
+	
+	SELECT         ct.PlanClientId AS ClientId , 
+				   sub.SourceSystemId AS EligibilitySystemId ,
+				   hh.PlanHouseholdId AS PolicyHolderId ,
+				   sub.ConsumerId AS SubscriberConsumerId,
+				   cm.ConsumerId AS MemberConsumerId,
+				   sub.PlanMemberId AS MemberId,		 
+				   sub.FirstName AS FirstName,
+				   sub.LastName AS LastName,
+				   hpc.StatePostalCode AS IssuerStateCode,
+				   hpc.IssuerId AS HiosId ,
+				   -- Subscriber Health Exchange ID for the Claim Line
+				   SubscriberExchangeId = COALESCE(sphix.MemberHealthExchangeId, sfhix.MemberHealthExchangeId, 'NOHIXID'),
+				   -- Subscriber Plan Effective Date for the Claim Line
+				   PlanEffDate = COALESCE(sphixpd.PlanEffDate, sfhixpd.PlanEffDate, snhixpd.PlanEffDate, @YearStart),
+				   -- Subscriber Plan Term Date for the Claim Line										
+				   PlanTermDate = COALESCE(sphixpd.PlanTermDate, sfhixpd.PlanTermDate, snhixpd.PlanTermDate, @YearEnd),
+				   ExtractDate = @ExtractDate,
+				   ExtractTime = @ExtractTime,
+				   c.BenefitPeriod AS BenefitYear,
+				   c.SourceSystemId,
+				   cl.AllowedAmt AS AllowedAmt,
+				   cl.PlanPaidAmt AS PlanPaidAmt,
+				   cl.PRTotalAmt AS PRTotalAmt,
+				   cl.BasePlanPRTotalAmt AS BasePlanPRTotalAmt,
+				   cl.FederalPlanPRTotalAmt AS FederalPlanPRTotalAmt, 
+				   ISNULL(cl.FederalSubsidyAmount,0) AS FederalSubsidyAmount,	
+				   ISNULL(cl.StateSubsidyAmount,0) AS StateSubsidyAmount,				   
+				   -- Claim HiosPlanID
+				   aphp.HiosPlanId AS HiosPlanId,
+				   StatePlanType=Right(c.HiosPlanId,2),
+				   opr.PlanProductIds AS PlanProductIds,
+				   IsClaimLineWithNegativeStateSubsidyAmt = CASE WHEN cl.StateSubsidyAmount < 0 THEN 'Y' ELSE 'N' END,
+				   IsCOBClaimLine  = CASE WHEN c.COBIndicator = 'Y' THEN 'Y' ELSE 'N' END,
+				   -- Update with new logic for non-effectuated new born 
+				   IsNewbornClaimLine = CASE WHEN DATEDIFF(day,cm.BirthDate, ISNULL(aen.EffDate, fen.EffDate)) <= 60 AND ISNULL(aen.EffDate, fen.EffDate) = ISNULL(aen.SubsidyEffDate, fen.SubsidyEffDate) AND LEN(RTRIM(ISNULL(ISNULL(aen.MemberHealthExchangeId, fen.MemberHealthExchangeId), ''))) = 0 THEN 'Y' ELSE 'N' END,
+				   
+				   IsOrphanClaimLineDueToRetroEligChange = CASE WHEN aen.EnrollmentId is null THEN 'Y' ELSE 'N' END,
+				   
+				   IsOrphanClaimLineDueToSubsidyChange = CASE WHEN asub.EnrollmentId is null THEN 'Y' ELSE 'N'END,
+
+				   IsOrphanClaimLineDueToRetroProductChange = CASE WHEN opr.PlanProductIds = ISNULL(apr.PlanProductIds, opr.PlanProductIds) THEN 'N' ELSE 'Y' END,
+				   
+				   'N' AS HasZeroStateSubsidyAmt ,
+				   'N' AS HasNegativeStateSubsidyAmt ,
+				   cl.ClaimId,
+				   HasMultipleMemberHealthExchangeId = CASE WHEN hixcnt.HixCount > 1 THEN 'Y' ELSE 'N' END,
+				   --Claim level remark code for flag (Y/N)				   
+				   IsClaimExcludedForRemark = CASE WHEN ecrc.Code is not null THEN 'Y'  ELSE 'N' END,				   				   
+				   -- Claimline level remark code for flag (Y/N)			  
+				   IsClaimLineExcludedForRemark = CASE WHEN eclrc.Code is not null THEN 'Y' ELSE 'N' END 
+	-- Intermediate Scope Working Table
+	INTO #CmsExtractSource			
+    FROM    -- Start with Plans for input criteria
+			Benefit.HiosPlan hp WITH ( NOLOCK )
+            INNER JOIN Benefit.HiosPlanCollection hpc WITH ( NOLOCK ) 
+				ON  hp.HiosPlanCollectionId = hpc.HiosPlanCollectionId
+				AND hp.BenefitPeriod = hpc.BenefitPeriod
+				AND hp.IsBasePlan = 0			-- Only Variant and State Plans
+				AND hp.IsOffExchange = 0		-- Only On Exchange Plans
+				AND hp.IsStatePlan = 1			-- Only State Plans
+			
+			-- Include the plans from the input criteria
+			INNER JOIN @TIssuerIds tis
+				ON  hpc.IssuerId = tis.IssuerId 
+				AND hpc.BenefitPeriod = @BenefitYear
+			
+			-- Include Claims Processed for the selected Hios Plans
+            INNER JOIN Claim.Claim c WITH ( NOLOCK ) 
+				ON  c.HiosPlanId = hp.HiosPlanId
+                AND c.BenefitPeriod = hp.BenefitPeriod
+                AND c.IsCsrClaim = 0			-- Only Real Claims
+			-- Include the bill type code to derive the billtype code     
+			LEFT JOIN Shared.BillTypeCode btc WITH (NOLOCK) ON btc.BillTypeCodeId = c.BillTypeCode
+
+			-- Include Member of the Claim
+            INNER JOIN Enrollment.Consumer cm WITH ( NOLOCK ) 
+				ON  cm.ConsumerId = c.ConsumerId
+            
+            -- Include the Subscriber of the Claim
+            INNER JOIN Enrollment.Consumer sub WITH ( NOLOCK ) 
+				ON  cm.HouseholdId = sub.HouseholdId
+                AND sub.IsSubscriber = 1
+           
+            -- Include the Household of the Member
+		    INNER JOIN Enrollment.Household hh WITH ( NOLOCK ) 
+				ON  hh.HouseholdId = cm.HouseholdId
+		    
+		    -- Include the Client of the subscriber
+			INNER JOIN Enrollment.Client ct WITH ( NOLOCK )
+				ON  ct.ClientId = sub.ClientId
+           
+            -- Include Claim Lines for selected Claims
+            INNER JOIN Claim.ClaimLine cl WITH ( NOLOCK ) 
+				ON  c.ClaimId = cl.ClaimId 
+				AND cl.ClaimLineStatusId = 1	-- Only Completed Lines
+				AND cl.IsSubsidyEligible = 1	-- Only Subsidy Eligible
+			
+			-- Get Latest Line Revision
+			INNER JOIN ( SELECT ClaimId ,
+								SourceLineNumber ,
+								MAX(ClaimLineRevision) ClaimLineRevision
+						 FROM   Claim.ClaimLine (NOLOCK)
+						 GROUP BY ClaimId, SourceLineNumber
+						) lr 
+				ON  cl.ClaimId = lr.ClaimId
+                AND cl.SourceLineNumber = lr.SourceLineNumber
+                AND cl.ClaimLineRevision = lr.ClaimLineRevision		-- Only latest Claim Line Revision
+             
+             -- Include Product That product was processed under
+             INNER JOIN	Enrollment.ProductBenefitPeriod pbp (NOLOCK)
+				ON	pbp.ProductBenefitPeriodId = c.ProductBenefitPeriodId							
+			 INNER JOIN	Enrollment.Product opr ( NOLOCK )
+				ON	pbp.ProductId = opr.ProductId
+			
+          OUTER APPLY (	SELECT TOP 1 enr.EnrollmentId,enr.SubsidyEffDate,enr.EffDate,enr.MemberHealthExchangeId
+							FROM   Enrollment.Enrollment enr (NOLOCK)
+							WHERE  ConsumerId = cm.ConsumerId
+									AND  enr.IsActive = 1
+									AND	(Case When	c.FormTypeId = 2 And ISNULL(btc.IsInPatient,0) = 1	-- Check  for in patient 
+											 Then	c.QualifiedDate	Else	cl.ServiceStartDate	End) 
+											 Between enr.EffDate and  ISNULL(enr.TermDate, Cast((Cast(DATEPART(yyyy,enr.EffDate)as varchar(4))+'-12-31') 
+												 as date))) aen
+			--Check for Active Subsidy 												 
+			OUTER APPLY (	SELECT TOP 1 enr.EnrollmentId
+							FROM   Enrollment.Enrollment enr (NOLOCK)
+							WHERE  ConsumerId = cm.ConsumerId
+									AND  enr.IsActive = 1
+									AND	(Case When c.FormTypeId = 2 And  ISNULL(btc.IsInPatient,0) = 1  -- Check  for in patient 
+											Then	c.QualifiedDate	Else	cl.ServiceStartDate	End) 
+												Between enr.SubsidyEffDate and ISNULL(enr.SubsidyTermDate,Cast((Cast(DATEPART(yyyy, enr.SubsidyEffDate)
+												as varchar(4))+'-12-31') as date))) asub
+			
+		    -- If-Available Include Subscriber Active Policy Product
+            --Get Active products 
+			OUTER APPLY (	SELECT  TOP 1  p2.PlanProductIds
+							FROM	Enrollment.HouseholdCoveragePeriod hcp2 (NOLOCK)
+									JOIN	Enrollment.Product p2 ( NOLOCK )
+											ON	hcp2.ProductId = p2.ProductId
+									JOIN	Enrollment.ProductBenefitPeriod pbp2 ( NOLOCK )
+											ON	hcp2.ProductBenefitPeriodId = pbp2.ProductBenefitPeriodId
+							WHERE	HouseholdId = cm.HouseholdID
+									AND	hcp2.IsActive = 1
+									AND  (Case When c.FormTypeId = 2 And  ISNULL(btc.IsInPatient,0) = 1 
+												Then c.QualifiedDate  Else  cl.InternalServiceStartDate End)  Between hcp2.EffDate and ISNULL(hcp2.TermDate,pbp2.EndDate)) apr		
+			
+			-- If we cannot find an active enrollment segment, try fallback for inactive enrollment segment
+			OUTER APPLY (	SELECT TOP 1 SubsidyEffDate,EffDate,MemberHealthExchangeId,SubsidyTermDate
+							FROM   Enrollment.Enrollment (NOLOCK)
+							WHERE  IsActive = 0 -- look for inactive
+							  AND  ConsumerId = cm.ConsumerId
+							  AND  cl.InternalServiceStartDate Between EffDate and ISNULL(TermDate, @YearEnd)	 
+							ORDER BY UpdateDate desc
+						 ) fen            
+          
+			-- If-Available Include the AssociatedProduct federal Variant or base Plan for the Product under which the claim was processed
+			OUTER APPLY (	SELECT top 1 ahp.HiosPlanId
+							FROM	Enrollment.AssociatedProduct ap WITH ( NOLOCK ) 							  
+							JOIN	Benefit.HiosPlan ahp WITH ( NOLOCK )
+								ON  ahp.HiosPlanId = ap.HiosPlanId
+								AND ahp.BenefitPeriod = @BenefitYear	-- Only Plans for Benefit Year of the claim
+								AND ahp.IsOffExchange = 0				-- Only On Exchange Plans
+							WHERE ap.ProductId = pbp.ProductId			-- Associated Products of the Claim Product
+							order by ahp.IsBasePlan asc					-- Get the federal variant firsr if not exsist then get base plan
+						) aphp
+			
+			-- If-Available Include the Subscriber Proper HixID
+			OUTER APPLY (	SELECT	TOP 1 e2.MemberHealthExchangeId
+							FROM	Enrollment.Enrollment e2 (NOLOCK)
+							JOIN	Enrollment.Product p2 ( NOLOCK )
+								ON	e2.ProductId = p2.ProductId
+							WHERE	e2.ConsumerId = sub.ConsumerId			
+							  AND	LEN(RTRIM(ISNULL(e2.MemberHealthExchangeId, ''))) > 0	-- Only Enrollments With HixID
+							  AND	cl.InternalServiceStartDate Between e2.EffDate and ISNULL(e2.TermDate, @YearEnd)	-- Enrollments for the service date
+							  AND	p2.PlanProductIds = opr.PlanProductIds										-- Products with same  PlanProductIds
+							  -- TODO: Should this be limited to active enrollment
+							ORDER BY e2.IsActive desc, e2.UpdateDate desc							-- Use first good one if not go with first bad one
+						 ) sphix
+			
+			-- If-Available Include the Subscriber Fallback HixID
+			OUTER APPLY (	SELECT	TOP 1 e2.MemberHealthExchangeId
+							FROM	Enrollment.Enrollment e2 (NOLOCK)
+							JOIN	Enrollment.Product p2 ( NOLOCK )
+								ON	e2.ProductId = p2.ProductId
+							WHERE	e2.ConsumerId = sub.ConsumerId			
+							  AND	LEN(RTRIM(ISNULL(e2.MemberHealthExchangeId, ''))) > 0	-- Only Enrollments With HixID
+							  AND	e2.EffDate Between @YearStart and @YearEnd				-- Enrollments for this Year
+							  AND	p2.PlanProductIds = opr.PlanProductIds			     	-- Products with same  PlanProductIds
+							ORDER BY e2.IsActive desc, e2.UpdateDate desc					-- Use first good one if not go with first bad one
+						 ) sfhix						 
+			
+			-- If-Available Include Subscriber Proper HixID Product Dates 
+			OUTER APPLY (	SELECT	PlanEffDate
+								,	PlanTermDate
+							FROM	[Report].[fn_StateCsrReconProductDates] (sub.ConsumerId, sphix.MemberHealthExchangeId, opr.PlanProductIds, @YearStart, @YearEnd, cl.InternalServiceStartDate)							
+						 ) sphixpd   
+			
+			-- If-Available Include Subscriber Fallback HixID Product Dates 
+			OUTER APPLY (	SELECT	PlanEffDate
+								,	PlanTermDate
+							FROM	[Report].[fn_StateCsrReconProductDates] (sub.ConsumerId, sfhix.MemberHealthExchangeId, opr.PlanProductIds, @YearStart, @YearEnd, cl.InternalServiceStartDate)							
+						 ) sfhixpd   
+			
+			-- Get count of multiple HixID's for a ClaimLine
+			OUTER APPLY (	SELECT	COUNT(DISTINCT e2.MemberHealthExchangeId) HixCount
+							FROM	Enrollment.Enrollment e2 (NOLOCK)
+							JOIN	Enrollment.Product p2 ( NOLOCK )
+								ON	e2.ProductId = p2.ProductId
+							WHERE	e2.ConsumerId = sub.ConsumerId			
+							  AND	LEN(RTRIM(ISNULL(e2.MemberHealthExchangeId, ''))) > 0	-- Only Enrollments With HixID
+							  AND	e2.EffDate Between @YearStart and @YearEnd				-- Enrollments for this Year
+							  AND	p2.PlanProductIds = opr.PlanProductIds					-- Products with same  PlanProductIds
+						 ) hixcnt   
+			
+			-- If-Available Include Subscriber No HixID Product Dates 
+			OUTER APPLY (	SELECT	PlanEffDate
+								,	PlanTermDate
+							FROM	[Report].[fn_StateCsrReconProductDates] (sub.ConsumerId, null, opr.PlanProductIds, @YearStart, @YearEnd, cl.InternalServiceStartDate)							
+						 ) snhixpd   
+			-- Include Claim level
+			OUTER APPLY (	SELECT top 1 ccr.Code
+							FROM	Claim.ClaimRemark  ccr WITH ( NOLOCK ) 							  
+							JOIN @ClaimRemarkCodes crc on ccr.Code = crc.Code
+							where ccr.ClaimId = c.ClaimId							
+					     ) ecrc			     				     
+			     
+			-- Include Claimline level
+			OUTER APPLY (	SELECT top 1 clcr.Code
+							FROM	Claim.ClaimLineRemark  clcr WITH ( NOLOCK ) 							  
+							JOIN @ClaimLineRemarkCodes clrc on clcr.Code = clrc.Code
+							where clcr.ClaimLineId = cl.ClaimLineId							
+					     ) eclrc
+
+--- Update flag for multi-hix
+
+    UPDATE  #CmsExtractSource
+    SET     HasMultipleMemberHealthExchangeId = 'Y'
+    FROM    #CmsExtractSource S
+            INNER JOIN -- ONLY GET ONES WITH COUNT > 1
+            ( SELECT    SubscriberConsumerId ,
+                        PlanProductIds
+              FROM      (
+						-- GET DISTINCT
+                          SELECT DISTINCT
+                                    SubscriberExchangeId ,
+                                    SubscriberConsumerId ,
+                                    PlanProductIds
+                          FROM      #CmsExtractSource
+                        ) w
+              GROUP BY  SubscriberConsumerId ,
+                        PlanProductIds
+              HAVING    COUNT(SubscriberConsumerId) > 1
+            ) Z ON S.SubscriberConsumerId = Z.SubscriberConsumerId
+                   AND S.PlanProductIds = Z.PlanProductIds
+									 	
+--- Aggregate Data to Subscriber Level And apply calculated filters
+	SELECT	ClientId, 
+			EligibilitySystemId,
+			PolicyHolderId,
+			SubscriberConsumerId,
+			MemberId,		 
+			FirstName,
+			LastName,
+			IssuerStateCode,
+			HiosId ,
+			ExtractDate,
+			ExtractTime,
+			BenefitYear,
+			TotalCountOfVariantPlans = 0,
+			RecordCode = '03',				   				   
+			SubscriberExchangeId,
+			'16-DigitQHPPlanId' = HiosPlanId,
+			PlanBenefitStartDate = REPLACE(CONVERT(varchar, PlanEffDate, 110),'-','' ),
+			PlanBenefitEndDate =  REPLACE(CONVERT(varchar, PlanTermDate, 110),'-','' ),
+			SelfOnlyOtherthanselfonly = null,
+			AnnualLimitationonCostSharingfortheStandardPlan = '0.00',
+			AnnualLimitationonCostSharefortheFederalAVLevelPlan ='0.00',
+			ActuarialValueoftheStandardPlan = '0.00',
+			ActuarialValueoftheFederalAVLevelPlan ='0.00',
+			AllowedCostsForEHB = SUM(AllowedAmt),
+			ActualAmountTheIssuerPaid = SUM(PlanPaidAmt),
+			ActualAmountTheEnrolleesPaidForEHB = SUM(PRTotalAmt),
+			AmountTheEnrolleesPaidForTheStandardPlan = SUM(BasePlanPRTotalAmt),
+			AmountTheEnrolleesPaidForTheFederalAVPlan = SUM(FederalPlanPRTotalAmt),
+			FederalCSRProvided = SUM(FederalSubsidyAmount),
+			StateCSRProvided = SUM(StateSubsidyAmount),
+			'PlanProductID' = PlanProductIds,
+			StatePlanType,
+			HasMultipleMemberHealthExchangeId= MAX(HasMultipleMemberHealthExchangeId),
+			IncludesClaimLinesWithNegativeStateSubsidyAmt = MAX(IsClaimLineWithNegativeStateSubsidyAmt),
+			IncludesCOBClaimLines = MAX(IsCOBClaimLine), 
+			IncludesNewbornClaimLines = MAX(IsNewbornClaimLine),
+			IncludesOrphanClaimLinesDueToRetroSubsidyChange = MAX(IsOrphanClaimLineDueToSubsidyChange),
+			IncludesOrphanClaimLinesDueToRetroEligChange = MAX(IsOrphanClaimLineDueToRetroEligChange),
+			IncludesOrphanClaimLinesDueToRetroProductChange = MAX(IsOrphanClaimLineDueToRetroProductChange),			
+			HasZeroStateSubsidyAmt = CASE WHEN SUM(StateSubsidyAmount) = 0 THEN 'Y' ELSE 'N' END,
+			HasNegativeStateSubsidyAmt = CASE WHEN SUM(StateSubsidyAmount) < 0 THEN 'Y' ELSE 'N' END,
+			IncludesClaimswithRemarkCodes = MAX(IsClaimExcludedForRemark),			
+			IncludesClaimLineswithRemarkCodes = MAX(IsClaimLineExcludedForRemark)
+	FROM	#CmsExtractSource s
+	WHERE	-- Apply exclusions
+			IsClaimLineWithNegativeStateSubsidyAmt in ('N', @IncludeLinesWithNegativeStateSubsidy)
+		AND	IsCOBClaimLine in ('N', @IncludeCobClaims)
+		AND IsOrphanClaimLineDueToSubsidyChange in ('N', @IncludeOrphanClaimLinesDueToSubsidy)
+		AND	IsNewbornClaimLine in ('N', @IncludeNewBornClaims)
+		AND	IsOrphanClaimLineDueToRetroEligChange in ('N', @IncludeOrphanEligibility)
+		AND	IsOrphanClaimLineDueToRetroProductChange in ('N', @IncludeOrphanProduct)
+		
+	GROUP BY
+			HiosPlanId,
+			StatePlanType,
+			SubscriberExchangeId,
+			ClientId, 
+			EligibilitySystemId,
+			PolicyHolderId,
+			SubscriberConsumerId,
+			MemberId,		 
+			FirstName,
+			LastName,
+			IssuerStateCode,
+			HiosId,
+			PlanProductIds,
+			PlanEffDate,
+			PlanTermDate,
+			ExtractDate,
+			ExtractTime,
+			BenefitYear
+		    	
+	HAVING	-- Apply Exclusions
+			CASE WHEN SUM(StateSubsidyAmount) = 0 THEN 'Y' ELSE 'N' END in ('N', @IncludePolicyZeroStateSubsidy)
+		AND	CASE WHEN SUM(StateSubsidyAmount) < 0 THEN 'Y' ELSE 'N' END in ('N', @IncludesPolicyWithNegativeStateSubsidy)
+	ORDER BY
+			MemberId,
+			SubscriberExchangeId
+			OPTION (MAXDOP 1)
+	
+END
