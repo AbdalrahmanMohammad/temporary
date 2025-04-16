@@ -4,7 +4,7 @@
 -- Description: Create SP to extract of CSR data from PlanXpand to the Health Plan to allow them to reconcile the State CSRs with CMS
 --				 for Sate of Massachusetts.
 -- =============================================
-CREATE PROCEDURE [Report].[MassachusettsStateCSRReconciliationExtract]  
+CREATE PROCEDURE [Report].[MassachusettsStateCSRReconciliationExtract2024P2]  
     
 	@BenefitYear VARCHAR(10),    
     @IssuerId VARCHAR(Max),
@@ -51,10 +51,12 @@ BEGIN
 	Declare @IncludeOrphanClaimLinesDueToSubsidy CHAR(1);	--Includes Orphan Claims Due to Retroactive Eligibility Change?	
 	Declare @YearStart Date -- Start of Benefit Year
 	Declare @YearEnd Date   -- End of Benefit Year
+	Declare @ServiceStartDate Date -- Date of Service End Date For The Report
 	
 	-- Set Year boundaries
 	Select	@YearStart = CONVERT(Date, @BenefitYear + '-01-01')
 		,	@YearEnd   = CONVERT(Date, @BenefitYear + '-12-31')
+		,	@ServiceStartDate = CONVERT(Date, @BenefitYear + '-04-19')
 	
 	
 	-------------------------------------------- Extract Values from Paramters --------------------------------------------
@@ -225,11 +227,19 @@ BEGIN
 			INNER JOIN Enrollment.Client ct WITH ( NOLOCK )
 				ON  ct.ClientId = sub.ClientId
            
+		    -- Get claim type info.
+		    OUTER APPLY (select btc.IsInPatient
+						from Shared.BillTypeCode btc ( NOLOCK )
+						Where btc.BillTypeCodeId = c.BillTypeCode ) ctyp
+
             -- Include Claim Lines for selected Claims
             INNER JOIN Claim.ClaimLine cl WITH ( NOLOCK ) 
 				ON  c.ClaimId = cl.ClaimId 
 				AND cl.ClaimLineStatusId = 1	-- Only Completed Lines
 				AND cl.IsSubsidyEligible = 1	-- Only Subsidy Eligible
+				AND ( ( ISNULL(ctyp.IsInPatient,0 ) = 1 AND c.ServiceStartDate >= @ServiceStartDate AND hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D'))
+					OR  ( ISNULL(ctyp.IsInPatient,0 ) = 0 AND cl.ServiceStartDate >= @ServiceStartDate AND hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D')) 
+					OR hp.HiosPlanId IN ('34484MA15100013A','34484MA15100013B','34484MA15100012A','34484MA15100012B','34484MA15100011X'))
 			
 			-- Get Latest Line Revision
 			INNER JOIN ( SELECT ClaimId ,
@@ -247,7 +257,7 @@ BEGIN
 				ON	pbp.ProductBenefitPeriodId = c.ProductBenefitPeriodId							
 			 INNER JOIN	Enrollment.Product opr ( NOLOCK )
 				ON	pbp.ProductId = opr.ProductId
-			
+		
           OUTER APPLY (	SELECT TOP 1 enr.EnrollmentId,enr.SubsidyEffDate,enr.EffDate,enr.MemberHealthExchangeId
 							FROM   Enrollment.Enrollment enr (NOLOCK)
 							WHERE  ConsumerId = cm.ConsumerId
