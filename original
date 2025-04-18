@@ -237,9 +237,10 @@ BEGIN
 				ON  c.ClaimId = cl.ClaimId 
 				AND cl.ClaimLineStatusId = 1	-- Only Completed Lines
 				AND cl.IsSubsidyEligible = 1	-- Only Subsidy Eligible
-				AND ( ( ISNULL(ctyp.IsInPatient,0 ) = 1 AND c.ServiceStartDate >= @ServiceStartDate AND hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D'))
-					OR  ( ISNULL(ctyp.IsInPatient,0 ) = 0 AND cl.ServiceStartDate >= @ServiceStartDate AND hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D')) 
-					OR hp.HiosPlanId IN ('34484MA15100013A','34484MA15100013B','34484MA15100012A','34484MA15100012B','34484MA15100011X'))
+				AND (hp.HiosPlanId NOT IN ('34484MA15100013C','34484MA15100013D')
+				    OR (hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D') AND ISNULL(ctyp.IsInPatient,0 ) = 1 AND c.ServiceStartDate >= @ServiceStartDate)
+					OR  (hp.HiosPlanId IN ('34484MA15100013C','34484MA15100013D') AND ISNULL(ctyp.IsInPatient,0 ) = 0 AND cl.InternalServiceStartDate >= @ServiceStartDate ) 
+					) 
 			
 			-- Get Latest Line Revision
 			INNER JOIN ( SELECT ClaimId ,
